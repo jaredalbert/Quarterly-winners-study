@@ -1,0 +1,193 @@
+This study examines several questions around the quarterly performance of quantiles of components of the Russell 3000 over the last 5 years.
+
+The first question: is there a difference in the performance over the following 4 quarters between the quantile performance rankings over the previous quarter. That is, do the returns of the last quarter give an indication of how the stock will do over the next 4 quarters?
+
+To answer this, the study resamples all data by end of quarter, then ranks the natural log performance of each stock into deciles. It then looks at how each decile does over the next four quarters.
+
+The data for this study is the daily closing prices of all 3514 components that were in the Russell 3000 during the last 5 years. Those that were removed/added from/to the index are included. Bankrupt/delisted companies are also included, and the price is adjusted for all corporate actions. This is a complete point in time data set.
+
+Begin by importing the necessary packages and reading the previously cleaned data into a dataframe
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import timedelta
+
+pd.set_option('display.max_columns', None)
+
+tickers = pd.read_csv('stock_final_1.csv')
+Create a date offset to be able to later test if the returns vary depending on whether the resample is based on the end of the quarter or some time in the middle. Then resample into quarterly data and clean up the new dataframe.
+
+tickers.Date = pd.to_datetime(tickers.Date)
+tickers['Offset_Date']=tickers.Date + timedelta(days=0)
+tickers.set_index('Offset_Date', inplace=True)
+
+q_tickers = tickers.groupby('Name').resample('Q').last()
+
+pd.options.mode.chained_assignment = None  # default='warn'
+
+df =q_tickers.drop(['Name'], axis = 1).reset_index()
+df.drop(columns = ['Low', 'High', 'Close', 'Open', 'Volume'], inplace = True)
+Create the natural log returns for each quarter for each stock in the Russell 3000 over the last 5 years
+
+stats = {}
+df_4 =pd.DataFrame()
+symbols = set(q_tickers['Name'])
+for s in symbols:
+    df_sym = df[df['Name']==str(s)]
+    for i in range(-1,5):
+        df_sym['ln_ret_' + str(i)] = np.log(df_sym['Adj Close']/df_sym['Adj Close'].shift(i)).shift(-i)
+        m = np.mean(df_sym['ln_ret_' + str(i)])
+        if i<0:    #needed to make the -q positive for rise and negative for fall to match q0 to q1
+            m*=-1
+        sd = np.std(df_sym['ln_ret_' + str(i)])
+        stats[str(s) + '_' + str(i)] = (m, sd)
+    df_4 =df_4.append(pd.DataFrame(df_sym))
+df_4['ln_ret_-1']=df_4['ln_ret_-1'] * -1  #Needed to make the -q positive for rise and negative for fall to match q0 to q1
+Split the returns of the starting quarter into quantiles. By setting the bins and steps variable, one can pick the granularity of the bins. In this case, it's deciles.
+
+df_4.reset_index(inplace = True)
+df_4.drop('index', axis =1, inplace=True)
+
+bins, steps = 10, .1
+df_5 = df_4['ln_ret_-1'].quantile(np.arange(0,int(bins*steps),steps)).reset_index()
+levels, vals =[], []
+for i in range(bins):
+    levels.append(df_5['ln_ret_-1'].iloc[i])
+for i in range(bins):
+    if i+1 in range(bins):
+        lower = df_4['ln_ret_-1']>=levels[i]  
+        upper = df_4['ln_ret_-1']<=levels[i+1]
+    else:
+        lower = df_4['ln_ret_-1']>=levels[i] 
+        upper = True
+    x = df_4[lower & upper]
+    vals.append((x['ln_ret_-1'].mean(),x['ln_ret_1'].mean(),x['ln_ret_2'].mean(),  \
+          x['ln_ret_3'].mean(),x['ln_ret_4'].mean()))
+df_6=pd.DataFrame(vals)
+Let's have a look at the deciles:
+
+fig, ax = plt.subplots(figsize=(6,6))
+fig.suptitle('Return of Decile Over the Next Four Quarters', fontsize=20)
+ax.set_xlabel('Quarter', fontsize=20)
+ax.set_ylabel('Natural Log Return', fontsize=20)
+ax.legend(title='Decile', fontsize =20)
+df_6.T.plot(ax=ax, xticks=([0,1,2,3,4]))
+No handles with labels found to put in legend.
+<AxesSubplot:xlabel='Quarter', ylabel='Natural Log Return'>
+
+There is a marked difference in the first quarter return between the 0th and 9th decile of about .083.
+
+After the first quarter, it seems like the upward drift of the stock market is most pronounced.
+
+To test significance of the 1st quarter return I'll run a t-test to quantify the difference between the means of the 0th and 9th decile, and also get the p-value to test the null hypothesis that the samples are actually from the same population. The variances are different so I will run Welch's t-test.
+
+from scipy import stats
+worst = df_4[((df_4['ln_ret_-1']>=levels[0])  & (df_4['ln_ret_-1']<=levels[1]))]['ln_ret_1'].dropna()
+best = df_4[df_4['ln_ret_-1']>=levels[-1]]['ln_ret_1'].dropna()
+print(f'Worst mean, stdev: {(np.mean(worst)):.3f}, {(np.std(worst)):.3f} \
+      \nBest mean, stdev: {(np.mean(best)):.3f}, {(np.std(best)):.3f}')
+print(stats.ttest_ind(worst, best, equal_var=False))
+Worst mean, stdev: 0.131, 0.174       
+Best mean, stdev: 0.048, 0.189
+Ttest_indResult(statistic=10.041715104683767, pvalue=3.7259742169101605e-23)
+The difference in the means is certainly statistically significant. So we'll reject the null hypothesis and say that one would do well to buy the biggest losers and sell the biggest winners at the end of a quarter.
+
+This raises the question: does it matter which quarter we do this in? Is there an end of year effect that is stronger than the effect of any given quarter. To explore this, we'll regroup by quarter and see if there is a difference between the quarters.
+
+df_4.groupby(df_4.Date.dt.month).mean()
+worst_s = df_4[((df_4['ln_ret_-1']>=levels[0])  & (df_4['ln_ret_-1']<=levels[1]))][['Date','ln_ret_1']].dropna()
+best_s = df_4[df_4['ln_ret_-1']>=levels[-1]][['Date','ln_ret_1']].dropna()
+worst_by_q = worst_s.groupby(worst_s['Date'].dt.month).mean()
+best_by_q = best_s.groupby(best_s['Date'].dt.month).mean()
+print(f'worst_by_q: {worst_by_q} \nbest_by_q: {best_by_q}')
+worst_by_q:       ln_ret_1
+Date          
+3     0.180817
+6     0.036546
+9     0.080294
+12    0.116710 
+best_by_q:       ln_ret_1
+Date          
+3     0.059191
+6     0.064207
+9     0.056265
+12    0.022619
+The 'Date' 3 quarter is the March ending quarter which starts after the 12 or December ending quarter. For the worst performing decile, it is the strongest up quarter which does imply that a lot of the effect is end of year, rather than end of quarter.
+
+For the best performing decile, all the quarters are about the same
+
+The final question of the study: does it matter if we sample from the middle of the quarter instead of the end? To do this, we'll use time delta to shift the date forward by 45 days (roughly half a quarter), resample on the shifted data, and re-run the study.
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import timedelta
+#import seaborn as sns
+
+pd.set_option('display.max_columns', None)
+
+tickers = pd.read_csv('stock_final_1.csv')
+tickers.Date = pd.to_datetime(tickers.Date)
+tickers['Offset_Date']=tickers.Date + timedelta(days=45) # here's the time shift
+tickers.set_index('Offset_Date', inplace=True)
+
+q_tickers = tickers.groupby('Name').resample('Q').last()
+
+pd.options.mode.chained_assignment = None  # default='warn'
+
+df =q_tickers.drop(['Name'], axis = 1).reset_index()
+df.drop(columns = ['Low', 'High', 'Close', 'Open', 'Volume'], inplace = True)
+
+stats = {}
+df_4 =pd.DataFrame()
+symbols = set(q_tickers['Name'])
+for s in symbols:
+    df_sym = df[df['Name']==str(s)]
+    for i in range(-1,5):
+        df_sym['ln_ret_' + str(i)] = np.log(df_sym['Adj Close']/df_sym['Adj Close'].shift(i)).shift(-i)
+        #print(df_sym)
+        m = np.mean(df_sym['ln_ret_' + str(i)])
+        if i<0:    #needed to make the -q positive for rise and negative for fall to match q0 to q1
+            m*=-1
+        sd = np.std(df_sym['ln_ret_' + str(i)])
+        stats[str(s) + '_' + str(i)] = (m, sd)
+    df_4 =df_4.append(pd.DataFrame(df_sym))
+df_4['ln_ret_-1']=df_4['ln_ret_-1'] * -1  #Needed to make the -q positive for rise and negative for fall to match q
+df_4.reset_index(inplace = True)
+df_4.drop('index', axis =1, inplace=True)
+
+bins, steps = 10, .1
+df_5 = df_4['ln_ret_-1'].quantile(np.arange(0,int(bins*steps),steps)).reset_index()
+levels, vals =[], []
+for i in range(bins):
+    levels.append(df_5['ln_ret_-1'].iloc[i])
+for i in range(bins):
+    if i+1 in range(bins):
+        lower = df_4['ln_ret_-1']>=levels[i]  
+        upper = df_4['ln_ret_-1']<=levels[i+1]
+    else:
+        lower = df_4['ln_ret_-1']>=levels[i] 
+        upper = True
+    x = df_4[lower & upper]
+    vals.append((x['ln_ret_-1'].mean(),x['ln_ret_1'].mean(),x['ln_ret_2'].mean(),  \
+          x['ln_ret_3'].mean(),x['ln_ret_4'].mean()))
+df_6=pd.DataFrame(vals)
+
+
+
+fig, ax = plt.subplots(figsize=(5,5))
+fig.suptitle('Return of quantile over the next 4 quarters', fontsize=25)
+ax.set_xlabel('Quarters', fontsize=20)
+ax.set_ylabel('Ln return', fontsize=20)
+df_6.T.plot(ax=ax, xticks=([0,1,2,3,4]))
+<AxesSubplot:xlabel='Quarters', ylabel='Ln return'>
+
+It seems to effect the returns dramatically if we sample from the middle of the quarter versus the end. The difference between the 0th and 9th decile 1st quarter return in this case is about .025 vs about .08 for the end of quarter resample.
+
+print(f'Mean of worst decile first quarter return: {(df_6.iloc[0,1]):.3f} \nMean of best decile first quarter return: \
+      {(df_6.iloc[9,1]):.3f}, \nDifference between the 0th and 9th decile first quarter return: {(df_6.iloc[0,1]-df_6.iloc[9,1]):.3f} \
+      ')
+Mean of worst decile first quarter return: 0.093 
+Mean of best decile first quarter return:       0.067, 
+Difference between the 0th and 9th decile first quarter return: 0.025   
